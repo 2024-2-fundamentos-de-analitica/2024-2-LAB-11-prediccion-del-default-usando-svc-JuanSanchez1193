@@ -95,3 +95,193 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.metrics import balanced_accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, make_scorer
+from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer
+import os
+import json
+import pickle
+import zipfile
+import glob
+import pandas as pd
+import gzip
+from sklearn.feature_selection import SelectKBest
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+
+
+
+
+
+
+
+
+def cargar_datos():
+
+    dataframe_test = pd.read_csv(
+        "./files/input/test_data.csv.zip",
+        index_col=False,
+        compression="zip",
+    )
+
+    dataframe_train = pd.read_csv(
+        "./files/input/train_data.csv.zip",
+        index_col = False,
+        compression ="zip",
+    )
+
+    return dataframe_train, dataframe_test
+
+
+def limpieza(df):
+    df_copy = df.copy()
+    df_copy = df_copy.rename(columns={'default payment next month' : "default"})
+    df_copy = df_copy.drop(columns=["ID"])
+    df_copy = df_copy.loc[df["MARRIAGE"] != 0]
+    df_copy = df_copy.loc[df["EDUCATION"] != 0]
+    df_copy["EDUCATION"] = df_copy["EDUCATION"].apply(lambda x: 4 if x >= 4 else x)
+    df_copy = df_copy.dropna()
+    return df_copy
+
+
+def division(df):
+    #X , Y
+    return df.drop(columns=["default"]), df["default"]
+    
+
+def crear_pipe(x_train):
+    categorical_columns = ["SEX","EDUCATION","MARRIAGE"]
+    numerical_columns = list(set(x_train.columns).difference(categorical_columns))
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('onehot', OneHotEncoder(handle_unknown='ignore'), categorical_columns), 
+            ("scaler", StandardScaler(with_mean=True, with_std=True), numerical_columns),
+        ],
+        remainder='passthrough'  # Mantener las columnas no categóricas sin transformar
+    )
+    
+    # Construcción del pipeline
+    pipeline = Pipeline([
+        ('preprocessor', preprocessor),       # Transformación de variables categóricas
+        ('pca', PCA()),                # Reducción de dimensionalidad con PCA
+        ('feature_selection', SelectKBest(score_func=f_classif)),       # Selección de características más relevantes
+        ('classifier', SVC(kernel="rbf", random_state=12345, max_iter=-1))                       # Modelo final: Máquina de Soporte Vectorial
+    ])
+
+    return pipeline
+
+
+def estimar(pipeline, x_train):
+    
+    param_grid = {
+    "pca__n_components": [20, x_train.shape[1] - 2],  # Probar diferentes números de componentes principales
+    'feature_selection__k': [12],            # Probar diferentes números de columnas seleccionadas
+    'classifier__kernel': ["rbf"],           # Ajustar el parámetro de regularización
+    'classifier__gamma': [0.1],              # Ajustes de gamma para el kernel RBF       
+    }   
+    # Definir validación cruzada con 10 splits
+    cv = StratifiedKFold(n_splits=10)
+
+    # Métrica de precisión balanceada
+    puntaje = make_scorer(balanced_accuracy_score)
+
+    # GridSearchCV para optimización de hiperparámetros
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        scoring=puntaje,
+        cv=cv,
+        n_jobs=-1  # Utilizar todos los núcleos disponibles
+    )
+
+    return grid_search
+    
+
+def output_crear(output_directory):
+    if os.path.exists(output_directory):
+        for file in glob.glob(f"{output_directory}/*"):
+            os.remove(file)
+        os.rmdir(output_directory)
+    os.makedirs(output_directory)
+
+
+def _save_model(path, estimator):
+    output_crear("files/models/")
+
+    with gzip.open(path, "wb") as f:
+        pickle.dump(estimator, f)
+        
+
+def calculate_metrics(dataset_type, y_true, y_pred):
+    """Calculate metrics"""
+    return {
+        "type": "metrics",
+        "dataset": dataset_type,
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1_score": f1_score(y_true, y_pred, zero_division=0),
+    }
+    
+
+def calculate_confusion(dataset_type, y_true, y_pred):
+    """Confusion matrix"""
+    cm = confusion_matrix(y_true, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_type,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])},
+    }
+
+import os
+import json
+
+def train_and_evaluate():
+    # Cargar y limpiar datos
+    data_train, data_test = cargar_datos()
+    data_train, data_test = limpieza(data_train), limpieza(data_test)
+    
+    # División en variables independientes y dependientes
+    x_train, y_train = division(data_train)
+    x_test, y_test = division(data_test)
+    
+    # Crear y entrenar el modelo
+    pipeline = crear_pipe(x_train)
+    estimator = estimar(pipeline, x_train)
+    estimator.fit(x_train, y_train)
+    
+    # Guardar modelo entrenado
+    model_path = os.path.join("files/models/", "model.pkl.gz")
+    _save_model(model_path, estimator)
+    
+    # Evaluación del modelo
+    y_test_pred = estimator.predict(x_test)
+    y_train_pred = estimator.predict(x_train)
+    
+    test_precision_metrics = calculate_metrics("test", y_test, y_test_pred)
+    train_precision_metrics = calculate_metrics("train", y_train, y_train_pred)
+    test_confusion_metrics = calculate_confusion("test", y_test, y_test_pred)
+    train_confusion_metrics = calculate_confusion("train", y_train, y_train_pred)
+    
+    # Guardar métricas
+    os.makedirs("files/output/", exist_ok=True)
+    metrics_path = "files/output/metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as file:
+        file.write(json.dumps(train_precision_metrics) + "\n")
+        file.write(json.dumps(test_precision_metrics) + "\n")
+        file.write(json.dumps(train_confusion_metrics) + "\n")
+        file.write(json.dumps(test_confusion_metrics) + "\n")
+
+def main():
+    train_and_evaluate()
+
+if __name__ == "__main__":
+    main()
